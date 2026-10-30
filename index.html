@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MusicPDF a MusicXML</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#faf8f4;--fg:#1f1d1a;--mut:#6b665e;--card:#fff;--bd:#ddd6c8;--ac:#2a6496;--acfg:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#17150f;--fg:#efeadf;--mut:#a39c8f;--card:#221f17;--bd:#3a3529;--ac:#5ba3d9;--acfg:#17150f}}
+*,*:before,*:after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 Georgia,'Times New Roman',serif}
+main{max-width:720px;margin:0 auto;padding:28px 18px 48px}
+h1{font-size:1.7rem;margin:0 0 4px}
+p.sub{color:var(--mut);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
+label{display:block;font-weight:bold;margin-bottom:6px}
+input[type=text]{width:100%;font:inherit;padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg)}
+input[type=file]{width:100%;font:inherit;margin-top:8px}
+button{font:inherit;background:var(--ac);color:var(--acfg);border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:10px 8px 0 0}
+button.alt{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+button:disabled{opacity:.45;cursor:default}
+#log{font:13px/1.5 ui-monospace,Menlo,monospace;color:var(--mut);white-space:pre-wrap;margin-top:10px}
+textarea{width:100%;height:200px;font:12px/1.4 ui-monospace,Menlo,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px}
+.prev{display:flex;gap:8px;overflow-x:auto;margin-top:10px}
+.prev img{height:110px;border:1px solid var(--bd);border-radius:4px;background:#fff}
+.note{font-size:.9rem;color:var(--mut)}
+.key-info{font-size:.85rem;color:var(--mut);margin-top:6px}
+a.ext{color:var(--ac)}
+</style>
+</head>
+<body>
+<main>
+<h1>🎼 MusicPDF a MusicXML</h1>
+<p class="sub">Sube una partitura en PDF y Claude la leerá para generar un archivo MusicXML que podrás abrir en MuseScore, Finale, Sibelius o Notion.</p>
+
+<div class="card">
+  <label for="apikey">Clave de API de Anthropic</label>
+  <input type="text" id="apikey" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false">
+  <p class="key-info">Obtén tu clave en <a class="ext" href="https://console.anthropic.com/settings/keys" target="_blank">console.anthropic.com</a>. La clave se guarda solo en este navegador y nunca sale de tu dispositivo salvo para llamar a la API de Anthropic.</p>
+</div>
+
+<div class="card">
+  <label for="file">Partitura en PDF</label>
+  <input type="file" id="file" accept="application/pdf">
+  <div class="prev" id="prev"></div>
+  <button id="go" disabled>Convertir a MusicXML</button>
+  <button id="cancel" class="alt" hidden>Cancelar</button>
+  <div id="log"></div>
+</div>
+
+<div class="card" id="out" hidden>
+  <strong>Resultado</strong>
+  <textarea id="xml" readonly></textarea>
+  <button id="dxml">Descargar .musicxml</button>
+  <button id="cp" class="alt">Copiar</button>
+  <p class="note">Revisa siempre el resultado contra el PDF original en MuseScore u otro editor; la lectura automática de partituras puede tener errores.</p>
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const log=t=>{$('log').textContent=t};
+const MAXP=6;
+let blobs=[], xmlOut='', ctl=null;
+
+// Guardar/recuperar clave en localStorage
+const KEY='anthropic_key';
+try{const k=localStorage.getItem(KEY); if(k) $('apikey').value=k;}catch(e){}
+$('apikey').oninput=()=>{try{localStorage.setItem(KEY,$('apikey').value.trim());}catch(e){}; updateGo();};
+
+function updateGo(){
+  $('go').disabled=!(blobs.length && $('apikey').value.trim().startsWith('sk-ant-'));
+}
+
+$('file').onchange=async e=>{
+  const f=e.target.files[0]; blobs=[]; $('prev').innerHTML=''; $('out').hidden=true;
+  if(!f) return;
+  try{
+    log('Leyendo PDF…');
+    const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
+    const n=Math.min(pdf.numPages,MAXP);
+    for(let i=1;i<=n;i++){
+      const pg=await pdf.getPage(i), v0=pg.getViewport({scale:1}),
+            sc=Math.min(2,1600/Math.max(v0.width,v0.height)*1.4);
+      const v=pg.getViewport({scale:sc}), c=document.createElement('canvas');
+      c.width=v.width; c.height=v.height;
+      const ctx=c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height);
+      await pg.render({canvasContext:ctx,viewport:v}).promise;
+      const b=await new Promise(r=>c.toBlob(r,'image/png')); blobs.push(b);
+      const im=new Image(); im.src=URL.createObjectURL(b); $('prev').appendChild(im);
+    }
+    log(`${n} página(s) lista(s)`+(pdf.numPages>MAXP?` (se usan solo las primeras ${MAXP})`:'')+'.');
+    updateGo();
+  }catch(err){log('No se pudo leer el PDF: '+(err.message||err));}
+};
+
+const PROMPT=`Eres un sistema de reconocimiento óptico de música. Las imágenes son las páginas, en orden, de una partitura. Transcríbela completa y devuelve SOLO un objeto JSON (sin texto ni comillas de bloque) con esta forma:
+{"title":"","subtitle":"","composer":"","fifths":0,"beats":2,"beatType":4,"clefOctave":0,
+ "parts":["Nombre pentagrama 1","Nombre pentagrama 2"],
+ "measures":[{"p":["tokens parte 1","tokens parte 2"],"repeatStart":false,"repeatEnd":false,"endingStart":0,"endingStop":0,"segno":false,"words":""}]}
+- fifths: armadura (sostenidos positivos, bemoles negativos). clefOctave: 1 si la clave de sol lleva un 8 encima, -1 si lo lleva debajo, 0 si no.
+- Una entrada por compás (incluido el anacrusa, si existe) con tokens separados por espacio por pentagrama. Si hay varios sistemas, sigue el orden de lectura.
+- Token de nota: PITCH:DUR. PITCH = letra A-G + # o b si lleva alteración (incluye armadura: en Sol mayor todo fa es F#) + octava (Do central=C4). Silencio: r:DUR. DUR en semicorcheas: 1=semicorchea,2=corchea,3=corchea.,4=negra,6=negra.,8=blanca,12=blanca.,16=redonda. Añade ~ al final si la nota está ligada con la siguiente.
+- repeatStart/repeatEnd en el compás donde aparece la barra. endingStart=1 o 2 en el primer compás de la casilla; endingStop=1 o 2 en el último. segno=true si lleva signo de segno. words: texto de dirección (D.S., D.C., Fine…).
+- Pon "" o 0 en lo que no aparezca. Lee con cuidado nota por nota.`;
+
+async function blobToBase64(blob){
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>res(r.result.split(',')[1]);
+    r.onerror=rej;
+    r.readAsDataURL(blob);
+  });
+}
+
+$('go').onclick=async()=>{
+  const apiKey=$('apikey').value.trim();
+  if(!apiKey.startsWith('sk-ant-')){log('Introduce una clave de API válida.');return;}
+  $('go').disabled=true; $('cancel').hidden=false; $('out').hidden=true;
+  log('Enviando imágenes a Claude… (puede tardar un minuto)');
+  ctl=new AbortController(); const ac=ctl;
+  try{
+    const images=await Promise.all(blobs.map(async b=>({
+      type:'image',
+      source:{type:'base64',media_type:'image/png',data:await blobToBase64(b)}
+    })));
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      signal:ac.signal,
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':apiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-calls':'true'
+      },
+      body:JSON.stringify({
+        model:'claude-sonnet-4-6',
+        max_tokens:8000,
+        messages:[{role:'user',content:[...images,{type:'text',text:PROMPT}]}]
+      })
+    });
+    if(ac.signal.aborted) return;
+    if(!resp.ok){const e=await resp.json().catch(()=>{}); throw new Error((e&&e.error&&e.error.message)||`HTTP ${resp.status}`);}
+    const data=await resp.json();
+    const text=data.content.map(c=>c.text||'').join('').replace(/```json|```/g,'').trim();
+    log('Generando MusicXML…');
+    const j=JSON.parse(text);
+    const {xml,warn}=build(j); xmlOut=xml; $('xml').value=xml; $('out').hidden=false;
+    log(`${j.measures.length} compases transcritos.`+(warn.length?'\nAvisos:\n'+warn.join('\n'):''));
+  }catch(err){
+    if(ac&&ac.signal.aborted) return;
+    log('Error: '+((err&&err.message)||err));
+  }finally{$('go').disabled=false; $('cancel').hidden=true; ctl=null; updateGo();}
+};
+
+$('cancel').onclick=()=>{
+  if(ctl){ctl.abort(); log('Conversión cancelada.');}
+  $('go').disabled=false; $('cancel').hidden=true; updateGo();
+};
+
+$('dxml').onclick=()=>{
+  const blob=new Blob([xmlOut],{type:'application/vnd.recordare.musicxml+xml'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download='partitura.musicxml'; document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url); a.remove();},2000);
+};
+
+$('cp').onclick=async()=>{
+  try{await navigator.clipboard.writeText(xmlOut); log('Copiado.');}
+  catch(e){$('xml').select(); log('Selecciona y copia el texto manualmente.');}
+};
+
+/* ---------- JSON -> MusicXML ---------- */
+const TY={1:['16th',0],2:['eighth',0],3:['eighth',1],4:['quarter',0],6:['quarter',1],8:['half',0],12:['half',1],16:['whole',0]};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function noteXml(tok,st,flats,oct){
+  let [p,d]=tok.split(':'); const tie=/~/.test(tok); p=p.replace('~',''); d=parseInt(String(d).replace('~',''),10);
+  const [ty,dot]=TY[d]||['quarter',0]; const o=['<note>']; let stop=false, acc='';
+  if(p.toLowerCase()==='r') o.push('<rest/>');
+  else{
+    const m=/^([A-G])(##|bb|#|b)?(-?\d)$/.exec(p); if(!m) throw new Error('Nota ilegible: '+tok);
+    const al={'#':1,'##':2,'b':-1,'bb':-2}[m[2]]||0;
+    o.push(`<pitch><step>${m[1]}</step>${al?`<alter>${al}</alter>`:''}<octave>${+m[3]+oct}</octave></pitch>`);
+    stop=st.tie===p;
+    if(al<0&&!stop&&!flats[p]) acc='flat';
+    if(al<0) flats[p]=1;
+  }
+  o.push(`<duration>${d}</duration>`);
+  const rest=p.toLowerCase()==='r';
+  if(!rest){if(stop)o.push('<tie type="stop"/>'); if(tie)o.push('<tie type="start"/>');}
+  o.push(`<voice>1</voice><type>${ty}</type>${dot?'<dot/>':''}`);
+  if(acc) o.push(`<accidental>${acc}</accidental>`);
+  if(!rest&&(stop||tie)) o.push('<notations>'+(stop?'<tied type="stop"/>':'')+(tie?'<tied type="start"/>':'')+'</notations>');
+  o.push('</note>'); st.tie=(!rest&&tie)?p:null;
+  return [o.join(''),d];
+}
+
+function build(j){
+  const warn=[], names=j.parts&&j.parts.length?j.parts:['Parte 1'];
+  const oct=+j.clefOctave||0, expect=(j.beats||2)*16/(j.beatType||4);
+  const out=names.map((_,pi)=>{
+    const st={}; let s=`<part id="P${pi+1}">`;
+    j.measures.forEach((m,i)=>{
+      const n=i+1; s+=`<measure number="${n}">`;
+      if(m.repeatStart) s+='<barline location="left"><bar-style>heavy-light</bar-style><repeat direction="forward"/></barline>';
+      if(m.endingStart) s+=`<barline location="left"><ending number="${m.endingStart}" type="start">${m.endingStart}.</ending></barline>`;
+      if(i===0) s+=`<attributes><divisions>4</divisions><key><fifths>${+j.fifths||0}</fifths></key><time><beats>${j.beats||2}</beats><beat-type>${j.beatType||4}</beat-type></time><clef><sign>G</sign><line>2</line>${oct?`<clef-octave-change>${oct}</clef-octave-change>`:''}</clef></attributes>`;
+      if(pi===0&&m.segno) s+='<direction placement="above"><direction-type><segno/></direction-type><sound segno="segno"/></direction>';
+      if(pi===0&&m.words){
+        const w=String(m.words);
+        const snd=/D\.?\s*S/i.test(w)?'<sound dalsegno="segno"/>':/D\.?\s*C/i.test(w)?'<sound dacapo="yes"/>':'';
+        s+=`<direction placement="above"><direction-type><words font-style="italic">${esc(w)}</words></direction-type>${snd}</direction>`;
+      }
+      let tot=0; const fl={};
+      for(const t of String((m.p||[])[pi]||'').split(/\s+/).filter(Boolean)){
+        try{const [x,d]=noteXml(t,st,fl,oct); s+=x; tot+=d;}
+        catch(e){if(pi===0) warn.push(`Compás ${n}: ${e.message}`);}
+      }
+      if(tot!==expect&&!(i===0&&tot<expect)) warn.push(`Compás ${n}, parte ${pi+1}: dura ${tot}/${expect} semicorcheas`);
+      if(m.repeatEnd||m.endingStop){
+        s+='<barline location="right">'
+          +(m.repeatEnd?'<bar-style>light-heavy</bar-style>':'')
+          +(m.endingStop?`<ending number="${m.endingStop}" type="${m.repeatEnd?'stop':'discontinue'}"/>`:'')
+          +(m.repeatEnd?'<repeat direction="backward"/>':'')
+          +'</barline>';
+      }
+      s+='</measure>';
+    });
+    return s+'</part>';
+  });
+  const xml='<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n'
+    +`<score-partwise version="3.1"><work><work-title>${esc(j.title)}</work-title></work>`
+    +`<identification>${j.composer?`<creator type="composer">${esc(j.composer)}</creator>`:''}</identification>`
+    +(j.title?`<credit page="1"><credit-type>title</credit-type><credit-words>${esc(j.title)}</credit-words></credit>`:'')
+    +(j.subtitle?`<credit page="1"><credit-type>subtitle</credit-type><credit-words>${esc(j.subtitle)}</credit-words></credit>`:'')
+    +(j.composer?`<credit page="1"><credit-type>composer</credit-type><credit-words>${esc(j.composer)}</credit-words></credit>`:'')
+    +'<part-list>'+names.map((n,i)=>`<score-part id="P${i+1}"><part-name>${esc(n)}</part-name></score-part>`).join('')+'</part-list>'
+    +out.join('')+'</score-partwise>';
+  return {xml,warn};
+}
+</script>
+</body>
+</html>
